@@ -1,18 +1,16 @@
 """OpenVINO backends for openecg deploy artifacts.
 
 Supports:
-  * ``codec_v6_int8.onnx`` (and other ``codec_*_int8.onnx``) via direct ONNX read
-  * ``boundary_int8.tflite`` via OpenVINO's TFLite frontend (currently fails on
-    the ai-edge-torch residual ADD graph — see ``BOUNDARY_TFLITE_ERROR``)
+  * ``codec_v6_int8.onnx`` via direct ONNX read
+  * ``boundary_v56c.onnx`` / ``boundary_v56c_wc8.xml`` (ONNX export recovered
+    from the bundled TFLite; native TFLite frontend still fails — see
+    :data:`BOUNDARY_TFLITE_ERROR`)
 
-Device selection: ``CPU`` (default), ``GPU``, or ``NPU``. Code accepts the flag
-even when only CPU is present on the host; compile will raise if the device is
-missing.
+Device selection: ``CPU`` (default), ``GPU``, or ``NPU``.
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
@@ -29,18 +27,29 @@ from openecg.dsp import rank_normalize
 
 BOUNDARY_TFLITE_ERROR = (
     "OpenVINO TFLite frontend cannot load boundary_int8.tflite: "
-    "GeneralFailure on ADD near patch_embed "
-    "('This tensor should be either input, constant or should be already "
-    "produced by previous operators'). "
-    "Workarounds tried: ov.convert_model, tflite2onnx, tf2onnx — all failed "
-    "(TFL_GELU / dequant Add). Use TFLite/LiteRT for the boundary detector "
-    "until an ONNX export of v56c ships or the TFLite frontend is fixed."
+    "GeneralFailure on ADD near patch_embed. "
+    "Use the ONNX export (boundary_v56c.onnx / boundary_v56c_wc8.xml) instead."
 )
 
 
 def available_devices() -> list[str]:
     import openvino as ov
     return list(ov.Core().available_devices)
+
+
+def bundled_boundary_onnx_path(*, prefer_wc8: bool = True) -> Path:
+    """Path to the OpenVINO-friendly boundary ONNX / IR artifact."""
+    root = Path(__file__).resolve().parent / "models"
+    wc8 = root / "boundary_v56c_wc8.xml"
+    onnx = root / "boundary_v56c.onnx"
+    if prefer_wc8 and wc8.exists():
+        return wc8
+    if onnx.exists():
+        return onnx
+    raise FileNotFoundError(
+        f"No OpenVINO boundary artifact at {wc8} or {onnx}. "
+        f"Run scripts/export_boundary_onnx.py first."
+    )
 
 
 def _compile(model_path: str | Path, device: str):
@@ -57,11 +66,7 @@ def _compile(model_path: str | Path, device: str):
 
 
 class OpenVINOCodec:
-    """OpenVINO-backed layered codec — drop-in for ``OnnxCodec`` / ``model=``.
-
-    Loads ``codec_{version}_int8.onnx`` through OpenVINO's ONNX frontend and
-    exposes :meth:`encode` returning :class:`~openecg.layered.LayeredCodec`.
-    """
+    """OpenVINO-backed layered codec — drop-in for ``OnnxCodec`` / ``model=``."""
 
     SEQ = CODEC_SEQ
 
@@ -78,7 +83,6 @@ class OpenVINOCodec:
         self.device = device.upper()
         self._compiled = _compile(self.path, self.device)
         self._input = self._compiled.inputs[0]
-        # Map outputs by name (frame/beat/rhythm).
         self._out = {}
         for o in self._compiled.outputs:
             name = o.get_any_name()
@@ -123,7 +127,6 @@ class OpenVINOCodec:
         return LayeredCodec(fs=int(fs), channels=channels)
 
     def forward_logits(self, window_5000: np.ndarray) -> dict[str, np.ndarray]:
-        """Raw head logits for a single rank-normalized 5000-sample window."""
         x = np.asarray(window_5000, dtype=np.float32).ravel()
         if x.size != self.SEQ:
             raise ValueError(f"expected {self.SEQ} samples, got {x.size}")
@@ -133,38 +136,74 @@ class OpenVINOCodec:
 
 
 class OpenVINOBoundary:
-    """Attempt to load ``boundary_int8.tflite`` into OpenVINO.
+    """OpenVINO-backed v56c boundary detector (ONNX / NNCF-compressed IR).
 
-    Raises :class:`RuntimeError` with :data:`BOUNDARY_TFLITE_ERROR` on failure
-    (current OpenVINO TFLite frontend cannot parse this graph).
+    Prefers ``boundary_v56c_wc8.xml`` (NNCF INT8 weight compression), then
+    ``boundary_v56c.onnx``. Direct TFLite load is still unsupported
+    (:data:`BOUNDARY_TFLITE_ERROR`).
     """
 
     def __init__(
         self,
-        tflite_path: str | Path | None = None,
+        model_path: str | Path | None = None,
         *,
         device: str = "CPU",
+        prefer_wc8: bool = True,
     ):
-        if tflite_path is None:
-            tflite_path = bundled_model_path()
-        self.path = str(tflite_path)
+        if model_path is None:
+            model_path = bundled_boundary_onnx_path(prefer_wc8=prefer_wc8)
+        self.path = str(model_path)
         self.device = device.upper()
-        try:
+        if self.path.endswith(".tflite"):
+            # Explicit legacy path — document the failure clearly.
+            try:
+                self._compiled = _compile(self.path, self.device)
+            except Exception as e:  # noqa: BLE001
+                raise RuntimeError(
+                    f"{BOUNDARY_TFLITE_ERROR}\nUnderlying: {e}"
+                ) from e
+        else:
             self._compiled = _compile(self.path, self.device)
-        except Exception as e:  # noqa: BLE001 — surface OV frontend error
-            raise RuntimeError(f"{BOUNDARY_TFLITE_ERROR}\nUnderlying: {e}") from e
         self._input = self._compiled.inputs[0]
-        self._cls = next(
-            o for o in self._compiled.outputs
-            if list(o.get_partial_shape())[-1] == N_CLASSES
-            or (o.shape is not None and len(o.shape) and o.shape[-1] == N_CLASSES)
-        )
+        self._cls = None
+        self._reg = None
+        for o in self._compiled.outputs:
+            name = o.get_any_name() or ""
+            # Prefer named outputs from our ONNX export.
+            if "cls" in name:
+                self._cls = o
+            elif "reg" in name:
+                self._reg = o
+        if self._cls is None:
+            for o in self._compiled.outputs:
+                shape = list(o.partial_shape)
+                # last dim == 4
+                try:
+                    last = int(str(shape[-1]))
+                except Exception:
+                    last = -1
+                if last == N_CLASSES or "4" in str(shape[-1]):
+                    self._cls = o
+                    break
+        if self._cls is None:
+            raise RuntimeError(f"could not locate cls_logits output in {self.path}")
 
     def forward_window(self, window: np.ndarray) -> np.ndarray:
+        """Return (N_FRAMES, 4) cls logits for a single 2500-sample window."""
         x = preprocess_window(window)[None, ...].astype(np.float32)
         rq = self._compiled.create_infer_request()
         rq.infer({self._input: x})
         return rq.get_tensor(self._cls).data.copy()[0]
+
+    def forward_window_cls_reg(self, window: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+        x = preprocess_window(window)[None, ...].astype(np.float32)
+        rq = self._compiled.create_infer_request()
+        rq.infer({self._input: x})
+        cls = rq.get_tensor(self._cls).data.copy()[0]
+        reg = None
+        if self._reg is not None:
+            reg = rq.get_tensor(self._reg).data.copy()[0]
+        return cls, reg
 
 
 __all__ = [
@@ -172,4 +211,5 @@ __all__ = [
     "OpenVINOBoundary",
     "BOUNDARY_TFLITE_ERROR",
     "available_devices",
+    "bundled_boundary_onnx_path",
 ]

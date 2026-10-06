@@ -9,3 +9,6 @@ psutil>=5.9
 scipy>=1.11
 wfdb>=4.1
 onnx>=1.14
+torch>=2.6
+nncf>=2.14
+ai-edge-litert>=1.0

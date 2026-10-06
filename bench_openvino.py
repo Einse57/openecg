@@ -138,12 +138,14 @@ def main() -> int:
 
     # --- Boundary OpenVINO (may fail) ---
     try:
-        ov_bound = OpenVINOBoundary(device=args.device)
+        ov_bound = OpenVINOBoundary(device=args.device, prefer_wc8=True)
+        print(f"[boundary] OpenVINO model: {ov_bound.path}")
 
         def run_ov_bound():
             ov_bound.forward_window(window250)
 
         results["boundary_openvino"] = _bench(run_ov_bound, args.runs, args.warmup)
+        results["boundary_openvino"]["model_path"] = ov_bound.path
         print("[boundary] OpenVINO")
         for k, v in results["boundary_openvino"].items():
             print(f"  {k}: {v:.3f}" if isinstance(v, float) else f"  {k}: {v}")
