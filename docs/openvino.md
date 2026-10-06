@@ -67,6 +67,16 @@ Native TFLite→OpenVINO frontend remains broken; use the ONNX/IR path.
 ```bash
 export OPENECG_LUDB_ZIP=data/physionet/ludb-1.0.1.zip
 export OPENECG_LUDB_CACHE=data/physionet/ludb_cache
-export OPENECG_QTDB_CACHE=data/physionet/qtdb_cache   # optional
+export OPENECG_ISP_ZIP=data/physionet/isp_delineation_dataset.zip   # Zenodo 14679837
+export OPENECG_ISP_CACHE=data/physionet/isp_cache
+export OPENECG_QTDB_CACHE=data/physionet/qtdb_cache
 python -m scripts.eval_macro_f1_openvino --device CPU --leads ii
 ```
+
+Reports Martinez macro-F1 for TFLite vs OpenVINO on LUDB val + ISP test + QTDB
+T-subset (repo splits), plus the unweighted mean vs README deploy-table 0.9274.
+TFLite per-corpus cells match the README table (~0.963 / 0.971 / 0.908).
+OV boundary gap vs TFLite is from imperfect TFLite→torch weight recovery (no
+upstream `.pt`); event-level smoke F1 remains 1.00. Codec OV is a clean path
+(direct ONNX, gated agree ≥0.997).
+

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""One-command Martinez macro-F1 on LUDB (and QTDB if available) for TFLite vs OpenVINO.
+"""One-command Martinez macro-F1 on LUDB + ISP + QTDB for TFLite vs OpenVINO.
 
-Uses the repo's ``data/splits/ludb_v1.json`` val split and lead II by default —
-matching the README table headline path.
+Matches the README headline path (lead II for LUDB/ISP; first lead for QTDB
+T-subset) and reports the mean over the three corpora vs README 0.9274.
 
 Requires::
 
     export OPENECG_LUDB_ZIP=... OPENECG_LUDB_CACHE=...
-    # optional:
-    export OPENECG_QTDB_CACHE=...
+    export OPENECG_ISP_ZIP=...  OPENECG_ISP_CACHE=...   # optional but needed for full mean
+    export OPENECG_QTDB_CACHE=...                       # or OPENECG_QTDB_ZIP
 
 Run::
 
@@ -27,7 +27,6 @@ import numpy as np
 
 from openecg import ludb
 from openecg.deploy import Inference, WINDOW_SAMPLES, preprocess_window
-from openecg.dsp import rank_normalize
 from openecg.stage2.evaluate import (
     BOUNDARY_KEYS,
     MARTINEZ_TOLERANCE_MS,
@@ -78,11 +77,17 @@ def _macro_f1(bp: dict, bt: dict) -> dict:
         per[k] = m
         if not np.isnan(m["f1"]):
             f1s.append(m["f1"])
-    return {"macro_f1": float(np.mean(f1s)) if f1s else float("nan"), "per_boundary": {
-        k: {kk: float(vv) if isinstance(vv, (float, np.floating, int, np.integer)) else vv
-            for kk, vv in v.items() if kk in ("f1", "sens", "ppv", "n_true", "n_pred", "median_abs_ms")}
-        for k, v in per.items()
-    }}
+    return {
+        "macro_f1": float(np.mean(f1s)) if f1s else float("nan"),
+        "per_boundary": {
+            k: {
+                kk: float(vv) if isinstance(vv, (float, np.floating, int, np.integer)) else vv
+                for kk, vv in v.items()
+                if kk in ("f1", "sens", "ppv", "n_true", "n_pred", "median_abs_ms")
+            }
+            for k, v in per.items()
+        },
+    }
 
 
 def eval_ludb(predict_fn, leads_subset, edge_margin_ms=100):
@@ -126,8 +131,55 @@ def eval_ludb(predict_fn, leads_subset, edge_margin_ms=100):
             pass
         cum += WINDOW_SAMPLES
         n += 1
-    elapsed = time.time() - t0
-    return _macro_f1(bp, bt) | {"n_windows": n, "elapsed_s": elapsed}
+    return _macro_f1(bp, bt) | {"n_windows": n, "elapsed_s": time.time() - t0}
+
+
+def eval_isp(predict_fn, leads_subset):
+    """ISP test, native 1000 Hz → 250 Hz (same as scripts/benchmark_v56c.py)."""
+    try:
+        from openecg import isp
+        isp.ensure_extracted()
+    except Exception as e:
+        return {"skipped": True, "reason": str(e)}
+
+    from openecg import isp
+
+    # README / benchmark_v56c use load_split()['test'] (72), not eval_test_records()
+    rec_ids = isp.load_split()["test"]
+    bp, bt = defaultdict(list), defaultdict(list)
+    cum = 0
+    n = 0
+    t0 = time.time()
+    for rid in rec_ids:
+        try:
+            record = isp.load_record(rid, split="test")
+            ann = isp.load_annotations_as_super(rid, split="test")
+        except Exception:
+            continue
+        for lead_idx, lead in enumerate(isp.LEADS_12):
+            if leads_subset and lead not in leads_subset:
+                continue
+            sig_1000 = record[lead]
+            sig_250 = _decimate_to_250(sig_1000, 1000)
+            if len(sig_250) < WINDOW_SAMPLES:
+                pad = np.zeros(WINDOW_SAMPLES - len(sig_250), dtype=sig_250.dtype)
+                sig_250 = np.concatenate([sig_250, pad])
+            sig_250 = sig_250[:WINDOW_SAMPLES].astype(np.float32)
+            preds = predict_fn(sig_250)
+            for k, vs in preds.items():
+                for s in vs:
+                    bp[k].append(int(s) + cum)
+            for k, v in ann.items():
+                if k.endswith("_on") or k.endswith("_off"):
+                    for s in v:
+                        s250 = int(s // 4)
+                        if 0 <= s250 < WINDOW_SAMPLES:
+                            bt[k].append(s250 + cum)
+            cum += WINDOW_SAMPLES
+            n += 1
+    if n == 0:
+        return {"skipped": True, "reason": "no ISP windows scored"}
+    return _macro_f1(bp, bt) | {"n_windows": n, "elapsed_s": time.time() - t0}
 
 
 def eval_qtdb(predict_fn):
@@ -158,10 +210,8 @@ def eval_qtdb(predict_fn):
     for rid in rids:
         try:
             rec = qtdb.load_record(rid)
-            # first lead
             lead = next(iter(rec))
             sig = rec[lead]
-            # QTDB is 250 Hz already in many records — loader returns native
             if len(sig) < WINDOW_SAMPLES:
                 continue
             ann = qtdb.load_q1c(rid)
@@ -169,6 +219,9 @@ def eval_qtdb(predict_fn):
             if win is None:
                 continue
             start, end = win
+            if end > len(sig):
+                end = len(sig)
+                start = max(0, end - WINDOW_SAMPLES)
             sig_250 = sig[start:start + WINDOW_SAMPLES].astype(np.float32)
             if len(sig_250) < WINDOW_SAMPLES:
                 continue
@@ -187,29 +240,64 @@ def eval_qtdb(predict_fn):
             continue
     if n == 0:
         return {"skipped": True, "reason": "no QTDB windows scored"}
-    return _macro_f1(bp, bt) | {"n_windows": n, "elapsed_s": time.time() - t0}
+    return _macro_f1(bp, bt) | {"n_windows": n, "elapsed_s": time.time() - t0, "n_t_subset": len(rids)}
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--device", default="CPU")
-    ap.add_argument("--leads", default="ii", help="'ii' or 'all'")
-    ap.add_argument("--out", type=Path, default=ROOT / "out/macro_f1_openvino.json")
-    ap.add_argument("--skip-qtdb", action="store_true")
-    args = ap.parse_args()
+def _mean_over(report: dict, backend: str) -> dict:
+    """Mean of per-corpus macro-F1 for corpora that actually ran."""
+    keys = [f"ludb_{backend}", f"isp_{backend}", f"qtdb_{backend}"]
+    vals = []
+    present = []
+    for k in keys:
+        block = report.get(k)
+        if not block or block.get("skipped"):
+            continue
+        f1 = block.get("macro_f1")
+        if f1 is None or (isinstance(f1, float) and np.isnan(f1)):
+            continue
+        vals.append(float(f1))
+        present.append(k)
+    return {
+        "macro_f1_mean": float(np.mean(vals)) if vals else float("nan"),
+        "n_corpora": len(vals),
+        "corpora": present,
+        "readme_baseline": 0.9274,
+        "delta_vs_readme": (float(np.mean(vals)) - 0.9274) if vals else float("nan"),
+    }
 
-    leads = None if args.leads == "all" else {args.leads.lower()}
 
-    # Ensure env for LUDB
+def _ensure_env() -> None:
     if "OPENECG_LUDB_ZIP" not in os.environ:
         cand = ROOT / "data/physionet/ludb-1.0.1.zip"
         if cand.exists():
             os.environ["OPENECG_LUDB_ZIP"] = str(cand)
             os.environ.setdefault("OPENECG_LUDB_CACHE", str(ROOT / "data/physionet/ludb_cache"))
+    if "OPENECG_ISP_ZIP" not in os.environ:
+        cand = ROOT / "data/physionet/isp_delineation_dataset.zip"
+        if cand.exists():
+            os.environ["OPENECG_ISP_ZIP"] = str(cand)
+            os.environ.setdefault("OPENECG_ISP_CACHE", str(ROOT / "data/physionet/isp_cache"))
     if "OPENECG_QTDB_CACHE" not in os.environ:
         cand = ROOT / "data/physionet/qtdb_cache"
         if cand.exists():
             os.environ["OPENECG_QTDB_CACHE"] = str(cand)
+    if "OPENECG_QTDB_ZIP" not in os.environ:
+        cand = ROOT / "data/physionet/qt-database-1.0.0.zip"
+        if cand.exists() and cand.stat().st_size > 80_000_000:
+            os.environ["OPENECG_QTDB_ZIP"] = str(cand)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--device", default="CPU")
+    ap.add_argument("--leads", default="ii", help="'ii' or 'all' (LUDB/ISP)")
+    ap.add_argument("--out", type=Path, default=ROOT / "out/macro_f1_openvino.json")
+    ap.add_argument("--skip-isp", action="store_true")
+    ap.add_argument("--skip-qtdb", action="store_true")
+    args = ap.parse_args()
+
+    leads = None if args.leads == "all" else {args.leads.lower()}
+    _ensure_env()
 
     from openecg.openvino_backend import OpenVINOBoundary
 
@@ -218,7 +306,10 @@ def main() -> int:
 
     report = {
         "readme_baseline_macro_f1_int8": 0.9274,
-        "readme_note": "0.9274 is mean over LUDB+ISP+QTDB; this script does LUDB (+ QTDB if present).",
+        "readme_note": (
+            "0.9274 is mean over LUDB val + ISP test + QTDB T-subset "
+            "(TFLite int8, lead II / first lead)."
+        ),
         "leads": args.leads,
         "device": args.device.upper(),
     }
@@ -231,13 +322,26 @@ def main() -> int:
     report["ludb_openvino"] = eval_ludb(lambda s: _ov_predict(ovb, s), leads)
     print("macro_f1", report["ludb_openvino"]["macro_f1"], "n", report["ludb_openvino"]["n_windows"], flush=True)
 
+    if not args.skip_isp:
+        print("=== ISP test / TFLite ===", flush=True)
+        report["isp_tflite"] = eval_isp(lambda s: _tflite_predict(det, s), leads)
+        print(report["isp_tflite"].get("macro_f1", report["isp_tflite"]), flush=True)
+        print("=== ISP test / OpenVINO ===", flush=True)
+        report["isp_openvino"] = eval_isp(lambda s: _ov_predict(ovb, s), leads)
+        print(report["isp_openvino"].get("macro_f1", report["isp_openvino"]), flush=True)
+
     if not args.skip_qtdb:
         print("=== QTDB T-subset / TFLite ===", flush=True)
         report["qtdb_tflite"] = eval_qtdb(lambda s: _tflite_predict(det, s))
-        print(report["qtdb_tflite"], flush=True)
+        print(report["qtdb_tflite"].get("macro_f1", report["qtdb_tflite"]), flush=True)
         print("=== QTDB T-subset / OpenVINO ===", flush=True)
         report["qtdb_openvino"] = eval_qtdb(lambda s: _ov_predict(ovb, s))
-        print(report["qtdb_openvino"], flush=True)
+        print(report["qtdb_openvino"].get("macro_f1", report["qtdb_openvino"]), flush=True)
+
+    report["mean_tflite"] = _mean_over(report, "tflite")
+    report["mean_openvino"] = _mean_over(report, "openvino")
+    print("=== MEAN TFLite ===", report["mean_tflite"], flush=True)
+    print("=== MEAN OpenVINO ===", report["mean_openvino"], flush=True)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=2))
