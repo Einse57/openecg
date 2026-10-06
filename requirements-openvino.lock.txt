@@ -1,0 +1,47 @@
+# Pinned for OpenVINO CPU smoke (Python 3.13, Linux x86_64). Regenerated 2026-10-06.
+# Install: python -m venv .venv && source .venv/bin/activate
+#          pip install -r requirements-openvino.lock.txt && pip install -e .
+ai-edge-litert==2.2.0
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.4
+aiosignal==1.4.0
+attrs==26.1.0
+backports.strenum==1.2.8
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.2
+contourpy==1.4.0
+cycler==0.12.1
+flatbuffers==25.12.19
+fonttools==4.66.1
+frozenlist==1.8.0
+fsspec==2026.9.0
+idna==3.20
+kiwisolver==1.5.1
+matplotlib==3.11.2
+ml_dtypes==0.6.0
+multidict==6.9.1
+numpy==2.5.3
+onnx==1.23.2
+onnxruntime==1.30.0
+opendsp==0.1.0
+openvino-telemetry==2025.2.0
+openvino==2026.4.1
+packaging==26.3
+pandas==3.0.6
+pillow==12.3.0
+propcache==0.5.4
+protobuf==7.36.2
+psutil==7.2.2
+pycparser==3.0
+pyparsing==3.3.3
+python-dateutil==2.9.0.post0
+requests==2.34.2
+scipy==1.18.1
+six==1.17.0
+soundfile==0.14.0
+tqdm==4.70.1
+typing_extensions==4.16.0
+urllib3==2.8.0
+wfdb==4.3.1
+yarl==1.25.1
