@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-command CPU/GPU/NPU bench: reference runtimes vs OpenVINO.
+"""One-command bench: reference runtimes vs OpenVINO.
 
 Examples
 --------
@@ -11,8 +11,8 @@ and peak RSS for:
   * boundary delineator: TFLite/LiteRT (reference); OpenVINO if loadable
   * layered codec: ONNX Runtime (reference) vs OpenVINO
 
-Numbers from this script on a shared cloud box are **not** Intel Core/Xeon
-target numbers — label them as box numbers when reporting.
+Latency depends on the host; report numbers together with the host they
+were measured on.
 """
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ def _bench(fn, runs: int, warmup: int) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--device", default="CPU", help="OpenVINO device: CPU|GPU|NPU")
+    ap.add_argument("--device", default="CPU", help="OpenVINO device name (default: CPU)")
     ap.add_argument("--runs", type=int, default=30, help="timed iterations")
     ap.add_argument("--warmup", type=int, default=5)
     ap.add_argument("--sample", default="mitdb100", choices=sorted(SAMPLES))
@@ -108,7 +108,6 @@ def main() -> int:
         available_devices,
     )
 
-    print(f"host_label: BOX (not Intel-target)")
     print(f"sample: {args.sample}")
     print(f"OpenVINO devices available: {available_devices()}")
     print(f"requested --device {args.device.upper()}")
@@ -117,7 +116,6 @@ def main() -> int:
     print()
 
     results: dict = {
-        "host_label": "BOX",
         "sample": args.sample,
         "device_requested": args.device.upper(),
         "devices_available": available_devices(),

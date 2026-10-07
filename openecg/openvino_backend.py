@@ -6,7 +6,7 @@ Supports:
     from the bundled TFLite; native TFLite frontend still fails — see
     :data:`BOUNDARY_TFLITE_ERROR`)
 
-Device selection: ``CPU`` (default), ``GPU``, or ``NPU``.
+Device selection: any OpenVINO device name (default ``CPU``).
 """
 from __future__ import annotations
 
@@ -56,10 +56,11 @@ def _compile(model_path: str | Path, device: str):
     import openvino as ov
     core = ov.Core()
     device = device.upper()
-    if device not in core.available_devices:
+    virtual = device.split(":", 1)[0] in ("AUTO", "HETERO", "MULTI", "BATCH")
+    if not virtual and device not in core.available_devices:
         raise RuntimeError(
             f"OpenVINO device {device!r} not available; have {core.available_devices}. "
-            f"Code supports --device CPU|GPU|NPU."
+            f"Pass any OpenVINO device name, e.g. CPU."
         )
     model = core.read_model(str(model_path))
     _make_static(model)
