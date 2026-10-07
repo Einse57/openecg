@@ -62,7 +62,26 @@ def _compile(model_path: str | Path, device: str):
             f"Code supports --device CPU|GPU|NPU."
         )
     model = core.read_model(str(model_path))
+    _make_static(model)
     return core.compile_model(model, device)
+
+
+def _make_static(model) -> None:
+    """Pin dynamic input dims (e.g. the codec's ``batch``) to 1.
+
+    Every caller here runs single-window batch-1 inference. Some device
+    compilers cannot derive output bounds from a dynamic batch dim
+    (codec ``node_unsqueeze``), so fix the shapes before compile.
+    """
+    import openvino as ov
+    new_shapes = {}
+    for inp in model.inputs:
+        ps = inp.get_partial_shape()
+        if ps.is_dynamic:
+            dims = [1 if d.is_dynamic else d.get_length() for d in ps]
+            new_shapes[inp.get_any_name()] = ov.PartialShape(dims)
+    if new_shapes:
+        model.reshape(new_shapes)
 
 
 class OpenVINOCodec:
