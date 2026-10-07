@@ -66,32 +66,61 @@ python scripts/agree_openvino.py --device CPU
 python bench_openvino.py --device CPU --runs 50
 ```
 
-`--device` takes an OpenVINO device name available on the host (default
-`CPU`). The scripts raise a clear error if the device is absent.
+`--device` takes any OpenVINO device name available on the host, e.g. `CPU`
+(default), `GPU`, `NPU`, or `AUTO`. The scripts raise a clear error if the device is absent.
 
-## Results
+## Tested on
+
+| | |
+|---|---|
+| Host CPU | Intel Core Ultra 7 265F |
+| OS / runtime | Windows 11 (10.0.26200), Python 3.12.10, OpenVINO 2026.4.1 |
+| OpenVINO devices tested | `CPU` (Intel Core Ultra 7 265F), `NPU` (Intel AI Boost) |
+| Integrated GPU | Not tested (this CPU has no integrated GPU) |
+| Other | The discrete NVIDIA GeForce RTX 4070 that OpenVINO exposes as `GPU` was not validated. The codec fails at GPU plugin program build on it. |
+
+Reference runtimes (TFLite / LiteRT for the boundary model, ONNX Runtime for the codec) always run on the host CPU.
 
 ### Boundary macro-F1 (Martínez tolerances)
 
-Lead II for LUDB/ISP, first lead for the QTDB T-subset; repo splits.
+Lead II for LUDB/ISP, first lead for the QTDB T-subset; repo splits (LUDB val n=41, ISP test n=72, QTDB T-subset n=44).
 
-| Corpus | n | TFLite (ref) | OpenVINO fp32 ONNX | OpenVINO wc8 |
-|---|---:|---:|---:|---:|
-| LUDB val | 41 | 0.9633 | 0.9633 | 0.9633 |
-| ISP test | 72 | 0.9711 | 0.9711 | 0.9715 |
-| QTDB T-subset | 44 | 0.9076 | 0.9076 | 0.9075 |
-| **Unweighted mean** | — | **0.9473** | **0.9473** | **0.9474** |
+| Corpus | TFLite (ref) | OV `CPU` fp32 | OV `CPU` 8-bit | OV `NPU` fp32 | OV `NPU` 8-bit |
+|---|---:|---:|---:|---:|---:|
+| LUDB val | 0.9633 | 0.9633 | 0.9633 | 0.9638 | 0.9633 |
+| ISP test | 0.9711 | 0.9711 | 0.9715 | 0.9711 | 0.9713 |
+| QTDB T-subset | 0.9076 | 0.9076 | 0.9075 | 0.9083 | 0.9090 |
+| **Unweighted mean** | **0.9473** | **0.9473** | **0.9474** | **0.9477** | **0.9479** |
 
-The TFLite per-corpus cells match the README table (~0.963 / 0.971 / 0.908).
+"8-bit" is `boundary_v56c_wc8.xml` (NNCF INT8 weight compression); "fp32" is `boundary_v56c.onnx`. The TFLite per-corpus cells match the README table (~0.963 / 0.971 / 0.908).
 
-### Agreement
+### Codec agreement vs ONNX Runtime (gated channels, `agree_openvino`)
 
-- Boundary vs TFLite (frame argmax on bundled samples): fp32 ONNX 1.000;
-  wc8 0.994–0.996.
-- Codec vs ONNX Runtime (gated channel agreement): ≥ 0.998
-  (synth_sinus 0.9995, mitdb100 0.9987).
+| Device | synth_sinus | mitdb100 |
+|---|---:|---:|
+| `CPU` | 0.9995 | 0.9987 |
+| `NPU` | 0.9985 | 0.9988 |
 
-### Reproduce macro-F1
+Boundary frame-argmax agreement vs TFLite on the bundled samples (`CPU`): fp32 1.000; 8-bit 0.994–0.996.
+
+### Latency per 10 s window (`bench_openvino.py --runs 50 --warmup 5`, sample mitdb100)
+
+mean / p50 / p90 in ms. Reference rows run on the host CPU in the same process.
+
+| Path | `--device CPU` | `--device NPU` |
+|---|---:|---:|
+| Boundary, TFLite / LiteRT (ref, CPU) | 23.80 / 23.71 / 24.12 | 23.77 / 23.70 / 24.07 |
+| Boundary, OpenVINO 8-bit | 2.32 / 2.21 / 2.66 | 4.41 / 3.78 / 6.45 |
+| Codec, ONNX Runtime int8 (ref, CPU) | 5.71 / 5.83 / 5.97 | 5.63 / 5.41 / 6.05 |
+| Codec, OpenVINO (bundled int8 ONNX) | 6.37 / 6.22 / 6.87 | 19.82 / 19.93 / 22.00 |
+
+Notes:
+
+- The codec compiles on `NPU` only with the static `[1, 5000]` input shape (see above).
+- On `NPU`, the shipped codec (dynamic-quantized int8 ONNX) takes ~19–20 ms per window.
+- In a separate experiment (not included in this tree), a static-shape fp32 ONNX re-export of `codec_v6.pt` ran at 5.67 / 5.51 / 6.22 ms on `NPU` and 4.26 / 4.17 / 4.58 ms on `CPU`. It agrees with the torch fp32 model at 0.999 (frame argmax), but its gated agreement vs the int8 ONNX Runtime reference is 0.9946. That is below the 0.998 gate used here; the torch fp32 model itself scores 0.9948 vs that reference.
+
+## Reproduce macro-F1
 
 ```bash
 export OPENECG_LUDB_ZIP=data/physionet/ludb-1.0.1.zip
