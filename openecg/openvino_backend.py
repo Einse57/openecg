@@ -6,7 +6,8 @@ Supports:
     from the bundled TFLite; native TFLite frontend still fails — see
     :data:`BOUNDARY_TFLITE_ERROR`)
 
-Device selection: any OpenVINO device name (default ``CPU``).
+Device selection: any OpenVINO device name, e.g. ``CPU`` (default), ``GPU``,
+``NPU``, or ``AUTO``.
 """
 from __future__ import annotations
 
@@ -37,6 +38,19 @@ def available_devices() -> list[str]:
     return list(ov.Core().available_devices)
 
 
+def device_full_names() -> dict[str, str]:
+    """``{device: FULL_DEVICE_NAME}`` for every available OpenVINO device."""
+    import openvino as ov
+    core = ov.Core()
+    out = {}
+    for d in core.available_devices:
+        try:
+            out[d] = str(core.get_property(d, "FULL_DEVICE_NAME"))
+        except Exception:  # noqa: BLE001
+            out[d] = "unknown"
+    return out
+
+
 def bundled_boundary_onnx_path(*, prefer_wc8: bool = True) -> Path:
     """Path to the OpenVINO-friendly boundary ONNX / IR artifact."""
     root = Path(__file__).resolve().parent / "models"
@@ -60,7 +74,7 @@ def _compile(model_path: str | Path, device: str):
     if not virtual and device not in core.available_devices:
         raise RuntimeError(
             f"OpenVINO device {device!r} not available; have {core.available_devices}. "
-            f"Pass any OpenVINO device name, e.g. CPU."
+            f"Pass any OpenVINO device name, e.g. CPU, GPU, NPU, or AUTO."
         )
     model = core.read_model(str(model_path))
     _make_static(model)
@@ -231,5 +245,6 @@ __all__ = [
     "OpenVINOBoundary",
     "BOUNDARY_TFLITE_ERROR",
     "available_devices",
+    "device_full_names",
     "bundled_boundary_onnx_path",
 ]

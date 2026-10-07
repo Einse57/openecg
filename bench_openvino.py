@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-command bench: reference runtimes vs OpenVINO.
+"""One-command bench: reference runtimes vs OpenVINO on CPU, GPU, NPU, or AUTO.
 
 Examples
 --------
@@ -79,9 +79,14 @@ def _bench(fn, runs: int, warmup: int) -> dict:
     }
 
 
+def _ov_version() -> str:
+    import openvino as ov
+    return ov.get_version()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--device", default="CPU", help="OpenVINO device name (default: CPU)")
+    ap.add_argument("--device", default="CPU", help="OpenVINO device name, e.g. CPU, GPU, NPU, AUTO (default: CPU)")
     ap.add_argument("--runs", type=int, default=30, help="timed iterations")
     ap.add_argument("--warmup", type=int, default=5)
     ap.add_argument("--sample", default="mitdb100", choices=sorted(SAMPLES))
@@ -106,11 +111,16 @@ def main() -> int:
         OpenVINOBoundary,
         OpenVINOCodec,
         available_devices,
+        device_full_names,
     )
+    import platform
+    full_names = device_full_names()
 
     print(f"sample: {args.sample}")
     print(f"OpenVINO devices available: {available_devices()}")
     print(f"requested --device {args.device.upper()}")
+    for d, n in full_names.items():
+        print(f"  {d}: {n}")
     print(f"runs={args.runs} warmup={args.warmup}")
     print(f"baseline README latency: 44 ms / 10 s window (TFLite int8, published)")
     print()
@@ -119,6 +129,10 @@ def main() -> int:
         "sample": args.sample,
         "device_requested": args.device.upper(),
         "devices_available": available_devices(),
+        "device_full_names": full_names,
+        "os": platform.platform(),
+        "python": platform.python_version(),
+        "openvino": _ov_version(),
         "readme_baseline_ms": 44,
     }
 
