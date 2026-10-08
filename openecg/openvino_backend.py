@@ -66,7 +66,7 @@ def bundled_boundary_onnx_path(*, prefer_wc8: bool = True) -> Path:
     )
 
 
-def _compile(model_path: str | Path, device: str):
+def _compile(model_path: str | Path, device: str, config: dict | None = None):
     import openvino as ov
     core = ov.Core()
     device = device.upper()
@@ -78,7 +78,62 @@ def _compile(model_path: str | Path, device: str):
         )
     model = core.read_model(str(model_path))
     _make_static(model)
-    return core.compile_model(model, device)
+    if device.startswith("GPU"):
+        _wrap_3d_interpolate(model)
+    return core.compile_model(model, device, config or {})
+
+
+def _wrap_3d_interpolate(model) -> int:
+    """Run 3-D ``Interpolate`` nodes as Unsqueeze -> 4-D Interpolate -> Squeeze.
+
+    Math is unchanged (the extra trailing dim has size 1 and scale 1). The
+    codec's 1-D nearest upsample (``node_upsample_nearest1d``) followed by a
+    1-D Conv fails GPU program build ("Data batch and filters rank do not
+    match"); the 4-D form compiles. Applied only for ``GPU`` devices.
+    """
+    import numpy as np
+    import openvino.opset11 as o11
+    import openvino.opset13 as ops
+
+    n = 0
+    for node in model.get_ordered_ops():
+        if node.get_type_name() != "Interpolate":
+            continue
+        ps = node.get_input_partial_shape(0)
+        if ps.rank.is_dynamic or ps.rank.get_length() != 3:
+            continue
+        attrs = node.get_attributes()
+        axis = ops.constant(np.array([3], np.int64))
+        x4 = ops.unsqueeze(node.input_value(0), axis)
+        axes = None
+        if node.get_input_size() >= 3:
+            scales = node.input_value(1)
+            axes = node.input_value(2)
+        else:
+            src = node.input_value(1).get_node()
+            if not hasattr(src, "get_data"):
+                continue
+            arr = src.get_data()
+            if arr.size != 3:
+                continue
+            scales = ops.constant(np.append(arr, 1).astype(arr.dtype))
+        new = o11.interpolate(
+            x4, scales,
+            mode=attrs["mode"],
+            shape_calculation_mode=attrs["shape_calculation_mode"],
+            pads_begin=list(attrs["pads_begin"]) + [0],
+            pads_end=list(attrs["pads_end"]) + [0],
+            coordinate_transformation_mode=attrs["coordinate_transformation_mode"],
+            nearest_mode=attrs["nearest_mode"],
+            antialias=attrs["antialias"],
+            cube_coeff=attrs["cube_coeff"],
+            axes=axes,
+        )
+        node.output(0).replace(ops.squeeze(new.output(0), axis).output(0))
+        n += 1
+    if n:
+        model.validate_nodes_and_infer_types()
+    return n
 
 
 def _make_static(model) -> None:
@@ -110,12 +165,18 @@ class OpenVINOCodec:
         *,
         version: str = "v6",
         device: str = "CPU",
+        config: dict | None = None,
     ):
         if onnx_path is None:
             onnx_path = bundled_codec_onnx_path(version)
         self.path = str(onnx_path)
         self.device = device.upper()
-        self._compiled = _compile(self.path, self.device)
+        if config is None and self.device.startswith("GPU"):
+            # GPU defaults to f16; f32 keeps codec agreement with the int8
+            # ONNX Runtime reference above the 0.998 gate.
+            config = {"INFERENCE_PRECISION_HINT": "f32"}
+        self.config = dict(config or {})
+        self._compiled = _compile(self.path, self.device, self.config)
         self._input = self._compiled.inputs[0]
         self._out = {}
         for o in self._compiled.outputs:

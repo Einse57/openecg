@@ -184,6 +184,7 @@ def main() -> int:
 
     # --- Codec OpenVINO ---
     ov_codec = OpenVINOCodec(device=args.device)
+    results["codec_openvino_config"] = ov_codec.config
 
     def run_ov_codec():
         ov_codec.forward_logits(x500)
