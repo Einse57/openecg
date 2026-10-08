@@ -1,0 +1,14 @@
+# Install: pip install -r requirements-openvino.txt && pip install -e .
+# Then optionally pin with: pip freeze > requirements-openvino.lock.txt
+numpy>=1.26,<3
+opendsp>=0.1.0
+onnxruntime>=1.17
+openvino>=2025.0
+ai-edge-litert>=1.0
+psutil>=5.9
+scipy>=1.11
+wfdb>=4.1
+onnx>=1.14
+torch>=2.6
+nncf>=2.14
+ai-edge-litert>=1.0
