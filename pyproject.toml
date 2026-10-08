@@ -75,6 +75,21 @@ deploy = ["tflite-runtime>=2.14", "onnxruntime>=1.17", "numpy>=1.26"]
 # ONNX codec — the minimal lightweight path: onnxruntime + numpy only.
 report = ["onnxruntime>=1.17", "numpy>=1.26"]
 
+# OpenVINO runtime for the bundled models (`openecg.openvino_backend`):
+# the int8 ONNX codec and the v56c boundary ONNX / INT8 weight-compressed IR,
+# on any OpenVINO device (CPU, GPU, NPU, AUTO). onnxruntime is the codec
+# reference used by the agreement checks. PyTorch is NOT required.
+openvino = ["openvino>=2025.0", "onnxruntime>=1.17"]
+
+# Dev-only: re-export `boundary_v56c.onnx` / `boundary_v56c_wc8.xml` from the
+# bundled TFLite (`scripts/export_boundary_onnx.py`; also needs a TFLite
+# interpreter, see `openvino-bench`).
+openvino-export = ["torch>=2.6", "onnx>=1.14", "nncf>=2.14"]
+
+# Dev-only: `scripts/bench_openvino.py` (peak RSS) and the TFLite reference
+# for the boundary comparisons (ai-edge-litert also covers Windows).
+openvino-bench = ["psutil>=5.9", "ai-edge-litert>=1.0"]
+
 # Dev-only: PyTorch → TFLite conversion for `openecg.deploy.export_boundary_tflite`.
 deploy-export = [
     "torch>=2.6",
@@ -117,6 +132,7 @@ artifacts = [
     "openecg/models/*.pt",
     "openecg/models/*.onnx",
     "openecg/models/*MODEL_CARD.md",
+    "openecg/models/boundary_v56c*",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -126,6 +142,10 @@ packages = ["openecg"]
 # and ``openecg.load_codec()`` work with no extra downloads.
 [tool.hatch.build.targets.wheel.force-include]
 "openecg/models/boundary_int8.tflite" = "openecg/models/boundary_int8.tflite"
+"openecg/models/boundary_v56c.onnx" = "openecg/models/boundary_v56c.onnx"
+"openecg/models/boundary_v56c_wc8.xml" = "openecg/models/boundary_v56c_wc8.xml"
+"openecg/models/boundary_v56c_wc8.bin" = "openecg/models/boundary_v56c_wc8.bin"
+"openecg/models/boundary_v56c_MODEL_CARD.md" = "openecg/models/boundary_v56c_MODEL_CARD.md"
 "openecg/models/codec_v1.pt" = "openecg/models/codec_v1.pt"
 "openecg/models/codec_v1_int8.onnx" = "openecg/models/codec_v1_int8.onnx"
 "openecg/models/codec_v1_MODEL_CARD.md" = "openecg/models/codec_v1_MODEL_CARD.md"
