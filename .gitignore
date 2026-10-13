@@ -87,3 +87,7 @@ out/
 # git repo at research/ → vitaldb/openecg-research (private). Never
 # include in the public package.
 research/
+
+# Keep sample helper docs (npy remain ignored via *.npy / data/*)
+!data/samples/
+!data/samples/README.md
