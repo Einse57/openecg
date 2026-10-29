@@ -12,7 +12,7 @@ window (2500 samples, 10 s @ 250 Hz, rank-normalized)
 | asset | what it is | checksums |
 |---|---|---|
 | `v56c.pt` | torch fp32 checkpoint (4,259,434 B) | md5 `4354112e1ff326314b839a558b013169`<br>sha256 `bde39ab38fcfe461f52b4b97d632c8e8c04b777727964f225de04523fe718156` |
-| `v56c_fp32.onnx` | fp32 ONNX, opset 17, self-contained (4,272,329 B) | md5 `c0ac150747fbd116ed348049b60ef216`<br>sha256 `12ed875dcb80315d50194205b96a1b8b397c0afc1d3c6b10a619d17f1adf090d` |
+| `v56c_fp32.onnx` | fp32 ONNX, opset 17, self-contained (4,272,229 B) | md5 `d3ef04d94d6b841f8dba8f7f8a55bf7d`<br>sha256 `6ae046ee058cbe05b28176d77760e19c2587efcab027ef13ea1990b1283a6c8e` |
 | `boundary_int8.tflite` | int8 deploy artifact, ships in-repo (1.4 MB) | — |
 
 ## Architecture & build
@@ -65,7 +65,9 @@ and scored against the torch fp32 model on 64 real LUDB windows:
 | frame argmax agreement | **100.0000%** (32,000 / 32,000) |
 | batch 1 / 2 / 8 | OK |
 
-The export is deterministic — re-running reproduces the md5 above. Reproduce with:
+The export is deterministic for a given toolchain — re-running reproduces the md5 above with torch 2.15.0,
+onnx 1.23.2, onnxscript 0.7.2 (other versions change only file metadata; parity numbers are unchanged).
+Reproduce with:
 
 ```bash
 python -m scripts.export_boundary_onnx --ckpt data/checkpoints/v56c.pt \
