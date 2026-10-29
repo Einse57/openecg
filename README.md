@@ -261,6 +261,10 @@ until ExecuTorch ships a weight-only int8 recipe. See
 [`docs/benchmarks/v56c_vs_baselines.md`](docs/benchmarks/v56c_vs_baselines.md)
 for the full backend comparison.
 
+OpenVINO (optional `[openvino]` extra): the boundary model (from the released
+`v56c_fp32.onnx`) and the int8 codec also run on OpenVINO `CPU`, `GPU` and `NPU`
+devices — see [`docs/openvino.md`](docs/openvino.md).
+
 ## Optional extras
 
 `pyproject.toml` declares optional dependency groups so each install is
@@ -273,6 +277,10 @@ minimal:
 - `[delineate]` — NeuroKit2 + scipy for the baseline comparison.
 - `[deploy-export]` — torch + ai-edge-torch for re-exporting the
   `.tflite` from a torch checkpoint (Linux / WSL only).
+- `[openvino]` — `openvino` + `onnxruntime` for `openecg.openvino_backend`
+  (boundary + codec on OpenVINO `CPU` / `GPU` / `NPU`; see
+  [`docs/openvino.md`](docs/openvino.md)). `[openvino-dev]` adds the tooling for
+  the comparison and latency scripts.
 
 ```bash
 pip install "openecg[deploy]"            # end-user inference
