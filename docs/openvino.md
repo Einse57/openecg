@@ -1,7 +1,7 @@
 # OpenVINO path
 
-`openecg.openvino_backend` runs the v56c boundary detector and the layered codec on
-OpenVINO, alongside the reference runtimes. It is an optional extra: nothing else in
+`openecg.openvino_backend` runs the v56c boundary detector on OpenVINO, alongside the
+reference runtimes. It is an optional extra: nothing else in
 openecg imports it, and the TFLite and ONNX Runtime paths are unchanged.
 
 ```bash
@@ -9,13 +9,11 @@ pip install "openecg[openvino]"
 ```
 
 ```python
-from openecg.openvino_backend import OpenVINOBoundary, OpenVINOCodec, available_devices
-import openecg
+from openecg.openvino_backend import OpenVINOBoundary, available_devices
 
 print(available_devices())                     # e.g. ['CPU', 'GPU', 'NPU']
 det = OpenVINOBoundary(device="CPU")           # v56c boundary, released fp32 ONNX
 cls_logits = det.forward_window(sig_250hz)     # (500, 4) for one 2500-sample window
-codec = openecg.encode(sig_500hz, fs=500, model=OpenVINOCodec(device="NPU"))
 ```
 
 `device` takes any OpenVINO device name available on the host, e.g. `CPU` (default),
@@ -26,7 +24,6 @@ codec = openecg.encode(sig_500hz, fs=500, model=OpenVINOCodec(device="NPU"))
 | Model | Reference runtime | OpenVINO input |
 |---|---|---|
 | Boundary detector (v56c) | `boundary_int8.tflite` via TFLite / LiteRT | `v56c_fp32.onnx` (release `boundary-v56c`), read directly |
-| Layered codec (v6) | `codec_v6_int8.onnx` via ONNX Runtime | the same ONNX file, read directly |
 
 The OpenVINO TFLite frontend cannot load `boundary_int8.tflite`, so `OpenVINOBoundary`
 reads the fp32 ONNX that `scripts/export_boundary_onnx.py` exports from `v56c.pt`
@@ -58,32 +55,28 @@ python -m scripts.verify_openvino_boundary --verify data/physionet/ludb_cache/<r
 `--tol` / `--min-agree` relax the gate for devices that do not compute in f32 (`NPU`; see
 the results below for the size of the f16 differences).
 
-## Compile steps (applied automatically)
+## Compile step (applied automatically)
 
-- **All devices:** dynamic input dims are fixed to batch 1 before `compile_model`
-  (codec input `[1, 5000]`). `NPU` needs static shapes to compile the codec.
-- **`GPU`:** 3-D `Interpolate` nodes are run as Unsqueeze → 4-D Interpolate → Squeeze,
-  which is numerically identical. Without it, the codec's 1-D nearest upsample followed
-  by a 1-D Conv fails GPU program build ("Data batch and filters rank do not match").
+The dynamic batch dim of the ONNX input is fixed to 1 before `compile_model`
+(input `[1, 2500]`), since inference is one window at a time.
 
 ## Precision
 
-`OpenVINOCodec` and `OpenVINOBoundary` take an OpenVINO `config=` dict. When it is not
-given, they set `INFERENCE_PRECISION_HINT=f32` on:
+`OpenVINOBoundary` takes an OpenVINO `config=` dict. When it is not given, it sets
+`INFERENCE_PRECISION_HINT=f32` on:
 
-- **`CPU`** (both classes), so results are reproducible across hosts. Without the hint,
-  OpenVINO picks bf16 on CPUs with native bf16 support.
-- **`GPU`** (both classes). With the device default (f16) the codec's gated agreement
-  vs ONNX Runtime falls below 0.998, and the boundary outputs no longer meet the
-  `1e-4` parity tolerance (Arc 140T: max |Δ| `cls_logits` 2.8e-2, 99.99 % frame-argmax
-  agreement, boundaries within one sample).
+- **`CPU`**, so results are reproducible across hosts. Without the hint, OpenVINO picks
+  bf16 on CPUs with native bf16 support.
+- **`GPU`**. With the device default (f16) the outputs no longer meet the `1e-4` parity
+  tolerance (Arc 140T: max |Δ| `cls_logits` 2.8e-2, 99.99 % frame-argmax agreement,
+  boundaries within one sample).
 
 Other devices use their own defaults. To opt into bf16 on a CPU that supports it, or
 into the device default:
 
 ```python
 OpenVINOBoundary(device="CPU", config={"INFERENCE_PRECISION_HINT": "bf16"})
-OpenVINOCodec(device="GPU", config={})   # device default (f16 on GPU)
+OpenVINOBoundary(device="GPU", config={})  # device default (f16 on GPU)
 ```
 
 The results below are for these defaults.
@@ -91,18 +84,15 @@ The results below are for these defaults.
 ## Reproduce
 
 ```bash
-pip install "openecg[openvino,openvino-dev,loaders]"
-python scripts/make_samples.py                # synthetic sinus @ 250 / 500 Hz (data/samples/, not committed)
-python scripts/make_samples.py --with-mitdb   # + PhysioNet MIT-BIH record 100 (needs network)
-
+pip install "openecg[openvino,loaders]"
 python -m scripts.verify_openvino_boundary --ludb-val --device CPU   # boundary vs fp32 ONNX
-python scripts/agree_openvino.py --device CPU                        # codec vs ONNX Runtime
-python scripts/latency_openvino.py --device CPU --runs 50 --warmup 5 --sample synth_sinus
 ```
 
 `verify_openvino_boundary.py` and `eval_macro_f1_openvino.py` decode boundaries with
 `openecg.stage2`, which imports `torch` (CPU build is enough); `pip install torch`
-first. `OpenVINOBoundary` / `OpenVINOCodec` themselves do not need it.
+first. `OpenVINOBoundary` itself does not need it. The `tflite` reference in
+`eval_macro_f1_openvino.py` needs a TFLite interpreter (`tflite-runtime` from
+`[deploy]`, or `ai-edge-litert` on Windows).
 
 Boundary macro-F1 on LUDB / ISP / QTDB (PhysioNet / Zenodo data, not redistributed),
 same protocol as the v56c model-card table (lead II; first lead for QTDB):
@@ -159,43 +149,3 @@ Frame-argmax agreement with the TFLite model over all scored windows is 0.9987 /
 0.9985 / 0.9978 (LUDB / ISP / QTDB) for every fp32 path, and 0.9986 / 0.9985 / 0.9978 on
 `NPU`. The difference from TFLite is the int8 weight rounding in `boundary_int8.tflite`
 (see the model card), not the runtime.
-
-### Latency measurements
-
-Model call only, batch 1, one 10 s window, mean / p50 / p90 in ms. Run from the
-interactive desktop session; launched from a non-interactive SSH session, Windows
-scheduled the process onto the E-cores and CPU-side latencies were several times higher.
-
-Boundary, over the 41 LUDB val records × 12 leads (`eval_macro_f1_openvino.py`,
-`ms_per_window`):
-
-| Path | mean / p50 / p90 |
-|---|---:|
-| TFLite int8 (ref, CPU) | 24.97 / 24.96 / 25.33 |
-| ONNX Runtime fp32 (CPU) | 10.52 / 6.98 / 20.29 |
-| OpenVINO `CPU` | 4.39 / 4.34 / 4.98 |
-| OpenVINO `GPU` | 2.97 / 2.72 / 3.77 |
-| OpenVINO `NPU` | 6.80 / 6.23 / 8.54 |
-| PyTorch `xpu` (from `v56c.pt`) | 3.81 / 3.67 / 4.59 |
-| PyTorch `cpu` (from `v56c.pt`) | 8.39 / 8.34 / 9.03 |
-
-`scripts/latency_openvino.py --runs 50 --warmup 5 --sample synth_sinus` (codec input is
-the 500 Hz sample):
-
-| Path | `--device CPU` | `--device GPU` | `--device NPU` |
-|---|---:|---:|---:|
-| Boundary, TFLite int8 (ref, CPU) | 25.06 / 24.98 / 25.43 | 25.09 / 25.09 / 25.36 | 25.25 / 25.15 / 25.64 |
-| Boundary, OpenVINO (`v56c_fp32.onnx`) | 4.65 / 4.62 / 5.20 | 2.61 / 2.40 / 3.55 | 5.04 / 4.31 / 7.83 |
-| Codec, ONNX Runtime int8 (ref, CPU) | 16.90 / 14.54 / 29.78 | 20.32 / 12.39 / 42.19 | 14.53 / 11.48 / 25.96 |
-| Codec, OpenVINO (bundled int8 ONNX) | 10.54 / 10.63 / 11.07 | 8.31 / 8.22 / 9.56 | 19.26 / 19.14 / 19.87 |
-
-### Codec agreement vs ONNX Runtime
-
-Gated channel agreement (frame / QRS-gated beat / rhythm) with the int8 ONNX Runtime
-reference, `scripts/agree_openvino.py`. Gate: ≥ 0.998.
-
-| Device | synth_sinus | mitdb100 |
-|---|---:|---:|
-| `CPU` | 0.9995 | 0.9987 |
-| `GPU` (f32 hint) | 0.9989 | 0.9989 |
-| `NPU` | 0.9985 | 0.9988 |

@@ -1,16 +1,14 @@
-"""OpenVINO backends for the bundled deploy models.
+"""OpenVINO backend for the v56c boundary detector.
 
-Supports:
-  * ``codec_v*_int8.onnx`` (layered codec, bundled), read directly
-  * ``v56c_fp32.onnx`` — the fp32 v56c boundary detector published as a
-    release asset (``boundary-v56c``; see ``openecg/models/v56c_MODEL_CARD.md``),
-    read directly. It is not bundled: pass its path, set
-    ``OPENECG_V56C_ONNX``, or call :func:`fetch_v56c_fp32_onnx` once.
+Reads ``v56c_fp32.onnx`` — the fp32 v56c boundary detector published as a
+release asset (``boundary-v56c``; see ``openecg/models/v56c_MODEL_CARD.md``)
+— directly. It is not bundled: pass its path, set ``OPENECG_V56C_ONNX``, or
+call :func:`fetch_v56c_fp32_onnx` once.
 
 Device selection: any OpenVINO device name, e.g. ``CPU`` (default), ``GPU``,
 ``NPU``, or ``AUTO``.
 
-Precision: on ``CPU`` and ``GPU`` both classes compile with
+Precision: on ``CPU`` and ``GPU`` the model compiles with
 ``INFERENCE_PRECISION_HINT=f32`` by default (OpenVINO would otherwise pick bf16
 on CPUs with native bf16 support and f16 on GPUs), so results match the
 reference runtimes. ``NPU`` uses its own default. Pass ``config=`` to override, e.g.
@@ -31,13 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
-from openecg.deploy import (
-    CODEC_FS,
-    CODEC_SEQ,
-    bundled_codec_onnx_path,
-    preprocess_window,
-)
-from openecg.dsp import rank_normalize
+from openecg.deploy import preprocess_window
 
 F32_HINT = {"INFERENCE_PRECISION_HINT": "f32"}
 
@@ -170,70 +162,14 @@ def _compile(model_path: str | Path, device: str, config: dict | None = None):
         )
     model = core.read_model(str(model_path))
     _make_static(model)
-    if device.startswith("GPU"):
-        _wrap_3d_interpolate(model)
     return core.compile_model(model, device, config or {})
 
 
-def _wrap_3d_interpolate(model) -> int:
-    """Run 3-D ``Interpolate`` nodes as Unsqueeze -> 4-D Interpolate -> Squeeze.
-
-    Math is unchanged (the extra trailing dim has size 1 and scale 1). The
-    codec's 1-D nearest upsample (``node_upsample_nearest1d``) followed by a
-    1-D Conv fails GPU program build ("Data batch and filters rank do not
-    match"); the 4-D form compiles. Applied only for ``GPU`` devices.
-    """
-    _import_openvino()
-    import openvino.opset11 as o11
-    import openvino.opset13 as ops
-
-    n = 0
-    for node in model.get_ordered_ops():
-        if node.get_type_name() != "Interpolate":
-            continue
-        ps = node.get_input_partial_shape(0)
-        if ps.rank.is_dynamic or ps.rank.get_length() != 3:
-            continue
-        attrs = node.get_attributes()
-        axis = ops.constant(np.array([3], np.int64))
-        x4 = ops.unsqueeze(node.input_value(0), axis)
-        axes = None
-        if node.get_input_size() >= 3:
-            scales = node.input_value(1)
-            axes = node.input_value(2)
-        else:
-            src = node.input_value(1).get_node()
-            if not hasattr(src, "get_data"):
-                continue
-            arr = src.get_data()
-            if arr.size != 3:
-                continue
-            scales = ops.constant(np.append(arr, 1).astype(arr.dtype))
-        new = o11.interpolate(
-            x4, scales,
-            mode=attrs["mode"],
-            shape_calculation_mode=attrs["shape_calculation_mode"],
-            pads_begin=list(attrs["pads_begin"]) + [0],
-            pads_end=list(attrs["pads_end"]) + [0],
-            coordinate_transformation_mode=attrs["coordinate_transformation_mode"],
-            nearest_mode=attrs["nearest_mode"],
-            antialias=attrs["antialias"],
-            cube_coeff=attrs["cube_coeff"],
-            axes=axes,
-        )
-        node.output(0).replace(ops.squeeze(new.output(0), axis).output(0))
-        n += 1
-    if n:
-        model.validate_nodes_and_infer_types()
-    return n
-
-
 def _make_static(model) -> None:
-    """Pin dynamic input dims (e.g. the codec's ``batch``) to 1.
+    """Pin dynamic input dims (the ONNX ``batch``) to 1.
 
-    Every caller here runs single-window batch-1 inference. Some device
-    compilers cannot derive output bounds from a dynamic batch dim
-    (codec ``node_unsqueeze``), so fix the shapes before compile.
+    Every caller here runs single-window batch-1 inference, so fix the
+    shapes before compile.
     """
     ov = _import_openvino()
     new_shapes = {}
@@ -244,83 +180,6 @@ def _make_static(model) -> None:
             new_shapes[inp.get_any_name()] = ov.PartialShape(dims)
     if new_shapes:
         model.reshape(new_shapes)
-
-
-class OpenVINOCodec:
-    """OpenVINO-backed layered codec — drop-in for ``OnnxCodec`` / ``model=``."""
-
-    SEQ = CODEC_SEQ
-
-    def __init__(
-        self,
-        onnx_path: str | Path | None = None,
-        *,
-        version: str = "v6",
-        device: str = "CPU",
-        config: dict | None = None,
-    ):
-        if onnx_path is None:
-            onnx_path = bundled_codec_onnx_path(version)
-        self.path = str(onnx_path)
-        self.device = device.upper()
-        if config is None and _device_base(self.device) in ("CPU", "GPU"):
-            # CPU: reproducible f32 instead of the bf16 default on CPUs with
-            # native bf16. GPU: the f16 default drops codec agreement with the
-            # int8 ONNX Runtime reference below the 0.998 gate.
-            config = F32_HINT
-        self.config = dict(config or {})
-        self._compiled = _compile(self.path, self.device, self.config)
-        self._input = self._compiled.inputs[0]
-        self._out = {}
-        for o in self._compiled.outputs:
-            name = o.get_any_name()
-            for head in ("frame", "beat", "rhythm"):
-                if head in name:
-                    self._out[head] = o
-                    break
-        missing = {"frame", "beat", "rhythm"} - set(self._out)
-        if missing:
-            raise RuntimeError(f"codec ONNX missing heads: {missing}")
-
-    def encode(self, signal: np.ndarray, fs: int = CODEC_FS):
-        from openecg.eval import ALL_SUPER_QRS_CLASSES, SUPER_OTHER
-        from openecg.layered import LayeredCodec
-
-        sig = np.asarray(signal, dtype=np.float32).ravel()
-        n = int(sig.size)
-        sig = np.asarray(rank_normalize(sig), dtype=np.float32)
-        if sig.size >= self.SEQ:
-            x = sig[: self.SEQ]
-        else:
-            x = np.zeros(self.SEQ, dtype=np.float32)
-            x[: sig.size] = sig
-        rq = self._compiled.create_infer_request()
-        rq.infer({self._input: x[None, :].astype(np.float32)})
-        outs = {h: rq.get_tensor(o).data.copy()[0] for h, o in self._out.items()}
-
-        def _arg(head, n_keep):
-            return outs[head].argmax(-1).astype(np.uint8)[:n_keep]
-
-        frame = _arg("frame", min(n, self.SEQ))
-        beat = _arg("beat", min(n, self.SEQ))
-        rhythm = _arg("rhythm", min(n, self.SEQ))
-        if n > self.SEQ:
-            pad = n - self.SEQ
-            frame = np.concatenate([frame, np.full(pad, SUPER_OTHER, np.uint8)])
-            beat = np.concatenate([beat, np.zeros(pad, np.uint8)])
-            rhythm = np.concatenate([rhythm, np.zeros(pad, np.uint8)])
-        qrs_mask = np.isin(frame, ALL_SUPER_QRS_CLASSES)
-        beat = np.where(qrs_mask, beat, 0).astype(np.uint8)
-        channels = np.stack([frame, beat, rhythm], axis=0)
-        return LayeredCodec(fs=int(fs), channels=channels)
-
-    def forward_logits(self, window_5000: np.ndarray) -> dict[str, np.ndarray]:
-        x = np.asarray(window_5000, dtype=np.float32).ravel()
-        if x.size != self.SEQ:
-            raise ValueError(f"expected {self.SEQ} samples, got {x.size}")
-        rq = self._compiled.create_infer_request()
-        rq.infer({self._input: x[None, :]})
-        return {h: rq.get_tensor(o).data.copy()[0] for h, o in self._out.items()}
 
 
 class OpenVINOBoundary:
@@ -387,8 +246,8 @@ class OpenVINOBoundary:
         """``(cls_logits, reg_offsets)`` for a single raw 2500-sample 250 Hz window."""
         return self.forward_preprocessed(preprocess_window(window))
 
+
 __all__ = [
-    "OpenVINOCodec",
     "OpenVINOBoundary",
     "BOUNDARY_TFLITE_ERROR",
     "F32_HINT",

@@ -12,7 +12,7 @@ Backends (``--backends``, comma-separated):
 * ``tflite``          bundled ``boundary_int8.tflite`` (TFLite / LiteRT) — reference
 * ``ort``             ``v56c_fp32.onnx`` on ONNX Runtime CPU
 * ``openvino:DEV``    ``v56c_fp32.onnx`` on OpenVINO device ``DEV`` (CPU, GPU, NPU, ...)
-* ``torch:DEV``       ``v56c.pt`` on PyTorch device ``DEV`` (cpu, xpu, cuda, ...)
+* ``torch:DEV``       ``v56c.pt`` on PyTorch device ``DEV`` (cpu, xpu, ...)
 
 Besides macro-F1 it reports, per backend and corpus, frame-argmax agreement with
 ``tflite`` (when it is in the list) and mean inference time per window

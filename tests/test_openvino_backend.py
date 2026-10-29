@@ -2,7 +2,7 @@
 
 Skipped unless ``openvino`` is installed (``pip install "openecg[openvino]"``).
 The TFLite comparison additionally needs a TFLite interpreter
-(``tflite-runtime`` or ``ai-edge-litert``); the codec comparison needs
+(``tflite-runtime`` or ``ai-edge-litert``); the ONNX Runtime comparison needs
 ``onnxruntime``. The boundary tests need the ``v56c_fp32.onnx`` release asset
 (``OPENECG_V56C_ONNX``, ``data/deploy/`` or the fetch cache) and are skipped
 without it. Everything runs on the ``CPU`` device.
@@ -81,94 +81,20 @@ def test_fetch_rejects_sha256_mismatch(tmp_path):
 
 def test_cpu_defaults_to_f32_and_config_overrides():
     # The OpenVINO CPU plugin would pick bf16 on CPUs with native bf16 support.
-    classes = [ovb.OpenVINOCodec]
-    try:
-        ovb.boundary_onnx_path()
-        classes.append(ovb.OpenVINOBoundary)
-    except FileNotFoundError:
-        pass
-    for cls in classes:
-        default = cls(device="CPU")
-        assert default.config == F32
-        assert default._compiled.get_property("INFERENCE_PRECISION_HINT") == ov.Type.f32
-        assert cls(device="CPU", config={}).config == {}
+    path = _boundary_onnx()
+    default = ovb.OpenVINOBoundary(path, device="CPU")
+    assert default.config == F32
+    assert default._compiled.get_property("INFERENCE_PRECISION_HINT") == ov.Type.f32
+    assert ovb.OpenVINOBoundary(path, device="CPU", config={}).config == {}
 
 
-def test_make_static_pins_codec_batch():
-    from openecg.deploy import CODEC_SEQ, bundled_codec_onnx_path
-
-    model = ov.Core().read_model(str(bundled_codec_onnx_path("v6")))
+def test_make_static_pins_boundary_batch():
+    model = ov.Core().read_model(str(_boundary_onnx()))
     assert any(i.get_partial_shape().is_dynamic for i in model.inputs)
     ovb._make_static(model)
     assert all(i.get_partial_shape().is_static for i in model.inputs)
-    assert list(model.inputs[0].get_shape()) == [1, CODEC_SEQ]
+    assert list(model.inputs[0].get_shape()) == [1, 2500]
     assert all(o.get_partial_shape().is_static for o in model.outputs)
-
-
-def _tiny_upsample_conv(with_axes: bool):
-    """x[1,4,8] -> nearest x2 upsample (3-D Interpolate) -> Conv1d -> y[1,3,16]."""
-    import openvino.opset11 as o11
-    import openvino.opset13 as ops
-
-    rng = np.random.default_rng(0)
-    x = ops.parameter([1, 4, 8], np.float32, name="x")
-    if with_axes:
-        scales = ops.constant(np.array([2.0], np.float32))
-        axes = ops.constant(np.array([2], np.int64))
-    else:
-        scales = ops.constant(np.array([1.0, 1.0, 2.0], np.float32))
-        axes = None
-    up = o11.interpolate(
-        x, scales, mode="nearest", shape_calculation_mode="scales",
-        coordinate_transformation_mode="asymmetric", nearest_mode="floor", axes=axes,
-    )
-    w = ops.constant(rng.standard_normal((3, 4, 3)).astype(np.float32))
-    y = ops.convolution(up, w, strides=[1], pads_begin=[1], pads_end=[1], dilations=[1])
-    return ov.Model([y], [x], "tiny_upsample_conv")
-
-
-def _interp_ranks(model) -> list[int]:
-    return [
-        n.get_input_partial_shape(0).rank.get_length()
-        for n in model.get_ordered_ops()
-        if n.get_type_name() == "Interpolate"
-    ]
-
-
-@pytest.mark.parametrize("with_axes", [True, False], ids=["axes", "no_axes"])
-def test_wrap_3d_interpolate_is_equivalent(with_axes):
-    core = ov.Core()
-    x = np.random.default_rng(1).standard_normal((1, 4, 8)).astype(np.float32)
-
-    ref_model = _tiny_upsample_conv(with_axes)
-    assert _interp_ranks(ref_model) == [3]
-    ref = core.compile_model(ref_model, "CPU")(x)[0]
-
-    model = _tiny_upsample_conv(with_axes)
-    assert ovb._wrap_3d_interpolate(model) == 1
-    assert _interp_ranks(model) == [4]
-    got = core.compile_model(model, "CPU")(x)[0]
-
-    assert got.shape == ref.shape == (1, 3, 16)
-    np.testing.assert_array_equal(got, ref)
-
-
-def test_codec_cpu_agrees_with_onnxruntime():
-    ort = pytest.importorskip("onnxruntime")
-    from openecg.deploy import OnnxCodec
-
-    ref_codec = OnnxCodec()
-    # Single-threaded reference session for a deterministic int8 baseline.
-    opts = ort.SessionOptions()
-    opts.intra_op_num_threads = 1
-    ref_codec._sess = ort.InferenceSession(
-        ref_codec.path, opts, providers=["CPUExecutionProvider"])
-
-    sig = _synth_sinus(500)
-    ref = ref_codec.encode(sig, fs=500).channels
-    got = ovb.OpenVINOCodec(device="CPU").encode(sig, fs=500).channels
-    assert got.shape == ref.shape == (3, 5000)
-    assert float(np.mean(got == ref)) >= 0.998
 
 
 def test_boundary_cpu_matches_onnxruntime():
